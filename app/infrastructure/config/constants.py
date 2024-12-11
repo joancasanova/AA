@@ -1,34 +1,24 @@
 # infrastructure/config/constants.py
 from typing import Final
 
-# Application Constants
-MAX_RETRIES: Final[int] = 3
-REQUEST_TIMEOUT: Final[int] = 30
-BATCH_SIZE: Final[int] = 100
+# Generation Constants
+MAX_GENERATIONS: Final[int] = 5
+MAX_TOKENS_PER_GENERATION: Final[int] = 2000
 
-# Cache Keys
-CACHE_KEY_PREFIX: Final[str] = "benchmark:"
-CACHE_TTL_SHORT: Final[int] = 300  # 5 minutes
-CACHE_TTL_MEDIUM: Final[int] = 3600  # 1 hour
-CACHE_TTL_LONG: Final[int] = 86400  # 24 hours
+# Verification Constants  
+SIMILARITY_THRESHOLD: Final[float] = 0.85
+VERIFICATION_TIMEOUT: Final[int] = 30
 
-# File Paths
-LOG_FILE_PATH: Final[str] = "logs/app.log"
-TEMP_DIR: Final[str] = "tmp"
-UPLOAD_DIR: Final[str] = "uploads"
+# Parsing Constants
+MAX_PARSE_LENGTH: Final[int] = 10000
+
+# Pipeline Constants
+MAX_PIPELINE_STAGES: Final[int] = 10
 
 # Error Messages
-ERR_DATABASE_CONNECTION: Final[str] = "Could not connect to database"
-ERR_CACHE_CONNECTION: Final[str] = "Could not connect to cache"
-ERR_MODEL_LOADING: Final[str] = "Could not load model"
+ERR_INVALID_PIPELINE: Final[str] = "Invalid pipeline configuration"
+ERR_VERIFICATION_AFTER_PARSE: Final[str] = "Verification cannot follow parsing in pipeline"
 ERR_INVALID_INPUT: Final[str] = "Invalid input provided"
 
 # Success Messages
-MSG_STARTUP: Final[str] = "Application started successfully"
-MSG_SHUTDOWN: Final[str] = "Application shut down gracefully"
-
-# Configuration Keys
-CONFIG_DATABASE: Final[str] = "database"
-CONFIG_CACHE: Final[str] = "cache"
-CONFIG_LLM: Final[str] = "llm"
-CONFIG_EMBEDDINGS: Final[str] = "embeddings"
+MSG_PIPELINE_COMPLETE: Final[str] = "Pipeline execution completed successfully"
