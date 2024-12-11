@@ -1,46 +1,164 @@
 # domain/services/verifier_service.py
+from typing import List, Dict, Optional, Callable
 import logging
-from app.domain.entities import VerificationMethod, VerificationMethodType
+from datetime import datetime
+from ..model.entities.verification import (
+    VerificationMethod, VerificationMethodType, VerificationMode,
+    VerificationResult, VerificationSummary
+)
+from ..model.value_objects.verification_status import VerificationStatus
+from ..model.value_objects.similarity_score import SimilarityScore
+from ..ports.embeddings_port import EmbeddingsPort
+from ..ports.llm_port import LLMPort
 
 logger = logging.getLogger(__name__)
 
 class VerifierService:
-    def __init__(self):
-        logger.info("VerifierService initialized")
+    def __init__(self, embeddings: EmbeddingsPort, llm: LLMPort):
+        self.embeddings = embeddings
+        self.llm = llm
 
-    def verify_embedding_method(self, method: VerificationMethod, get_similarity, response: str) -> bool:
-        logger.info(f"Verifying embedding method with response: {response}")
-        sim = get_similarity(method.embedding_settings.reference_text, response)
-        low = method.embedding_settings.lower_threshold
-        up = method.embedding_settings.upper_threshold
-        result = (sim > low) and (sim < up)
-        logger.debug(f"Similarity: {sim}, Lower Threshold: {low}, Upper Threshold: {up}, Result: {result}")
-        return result
+    def verify_text(
+        self,
+        text: str,
+        methods: List[VerificationMethod],
+        required_for_confirmed: int,
+        required_for_review: int
+    ) -> VerificationSummary:
+        start_time = datetime.now()
+        results: List[VerificationResult] = []
+        cumulative_passes = 0
 
-    def verify_consensus_method(self, method: VerificationMethod, generate_responses, entries) -> bool:
-        logger.info(f"Verifying consensus method with entries: {entries}")
-        cs = method.consensus_settings
-        # Try to fill placeholders from entries
-        placeholder_values = {}
-        for ph in cs.placeholders:
-            found = False
-            for e in entries:
-                if ph in e.data:
-                    placeholder_values[ph] = e.data[ph]
-                    found = True
-                    break
-            if not found:
-                logger.warning(f"Placeholder {ph} not found in entries")
-                return False
+        for method in methods:
+            result = self._apply_verification_method(method, text)
+            results.append(result)
 
-        final_system = cs.system_prompt
-        final_user = cs.user_prompt
-        for ph, val in placeholder_values.items():
-            final_system = final_system.replace("{" + ph + "}", val)
-            final_user = final_user.replace("{" + ph + "}", val)
+            if not result.passed and method.mode == VerificationMode.ELIMINATORY:
+                final_status = VerificationStatus.DISCARDED
+                break
+            
+            if result.passed and method.mode == VerificationMode.CUMULATIVE:
+                cumulative_passes += 1
 
-        responses = generate_responses(final_system, final_user, cs.num_responses, cs.max_new_tokens)
-        positives = sum(any(p.lower() in r.lower() for p in cs.positive_responses) for r in responses)
-        result = positives >= cs.num_positive_required
-        logger.debug(f"Positive responses count: {positives}, Required: {cs.num_positive_required}, Result: {result}")
-        return result
+        else:  # Only executed if no break occurred
+            if cumulative_passes >= required_for_confirmed:
+                final_status = VerificationStatus.CONFIRMED
+            elif cumulative_passes >= required_for_review:
+                final_status = VerificationStatus.REVIEW
+            else:
+                final_status = VerificationStatus.DISCARDED
+
+        verification_time = (datetime.now() - start_time).total_seconds()
+
+        return VerificationSummary(
+            results=results,
+            final_status=final_status.value,
+            verification_time=verification_time
+        )
+
+    def _apply_verification_method(
+        self,
+        method: VerificationMethod,
+        text: str
+    ) -> VerificationResult:
+        if method.method_type == VerificationMethodType.EMBEDDING:
+            return self._verify_embedding(method, text)
+        elif method.method_type == VerificationMethodType.CONSENSUS:
+            return self._verify_consensus(method, text)
+        elif method.method_type == VerificationMethodType.REGEX:
+            return self._verify_regex(method, text)
+        elif method.method_type == VerificationMethodType.CUSTOM:
+            return self._verify_custom(method, text)
+        else:
+            raise ValueError(f"Unknown verification method type: {method.method_type}")
+
+    def _verify_embedding(self, method: VerificationMethod, text: str) -> VerificationResult:
+        if not method.reference_text or not method.thresholds:
+            raise ValueError("Embedding verification requires reference text and thresholds")
+
+        similarity = self.embeddings.get_similarity(method.reference_text, text)
+        passed = method.thresholds.is_within_bounds(similarity.value)
+
+        return VerificationResult(
+            method=method,
+            passed=passed,
+            score=similarity.value,
+            details={
+                "similarity_score": similarity.value,
+                "reference_text": method.reference_text,
+                "thresholds": {
+                    "lower": method.thresholds.lower_bound,
+                    "upper": method.thresholds.upper_bound
+                }
+            }
+        )
+
+    def _verify_consensus(self, method: VerificationMethod, text: str) -> VerificationResult:
+        if not method.required_matches:
+            raise ValueError("Consensus verification requires required_matches")
+
+        # Generate multiple verifications using LLM
+        system_prompt = f"Verify the following text:\n{text}"
+        user_prompt = "Is this text valid? Respond with 'yes' or 'no'."
+        
+        responses = self.llm.generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            num_sequences=5,  # Generate 5 independent verifications
+            max_tokens=10  # Short responses expected
+        )
+
+        positive_responses = sum(1 for r in responses if r.content.strip().lower() == 'yes')
+        passed = positive_responses >= method.required_matches
+
+        return VerificationResult(
+            method=method,
+            passed=passed,
+            score=positive_responses / len(responses),
+            details={
+                "total_responses": len(responses),
+                "positive_responses": positive_responses,
+                "required_matches": method.required_matches
+            }
+        )
+
+    def _verify_regex(self, method: VerificationMethod, text: str) -> VerificationResult:
+        import re
+        if not hasattr(method, 'pattern'):
+            raise ValueError("Regex verification requires a pattern")
+
+        pattern = getattr(method, 'pattern')
+        matches = re.findall(pattern, text)
+        passed = len(matches) > 0
+
+        return VerificationResult(
+            method=method,
+            passed=passed,
+            score=1.0 if passed else 0.0,
+            details={
+                "matches_found": len(matches),
+                "pattern": pattern
+            }
+        )
+
+    def _verify_custom(self, method: VerificationMethod, text: str) -> VerificationResult:
+        if not hasattr(method, 'verification_function'):
+            raise ValueError("Custom verification requires a verification_function")
+
+        verification_func = getattr(method, 'verification_function')
+        result = verification_func(text)
+        
+        if isinstance(result, tuple):
+            passed, score = result
+        else:
+            passed = result
+            score = 1.0 if passed else 0.0
+
+        return VerificationResult(
+            method=method,
+            passed=passed,
+            score=score,
+            details={
+                "custom_verification": "Applied custom verification function"
+            }
+        )

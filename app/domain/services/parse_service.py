@@ -1,109 +1,110 @@
 # domain/services/parse_service.py
-import logging
+from typing import List, Dict, Optional, Tuple
 import re
-from typing import Dict, List, Optional
-from app.domain.entities import (ParseConfiguration, ParseRule, ParseMode, ParseScope, ParseFallbackStrategy, ParseMultipleStrategy)
+import logging
+from ..model.entities.parsing import (
+    ParseRule, ParseEntry, ParsedDocument, ParseMode, 
+    ParseScope, ParseStrategy
+)
+from ..model.value_objects.parse_result import ParseResult, ParseMatch, ParseMetrics, ParseLocation
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class ParseService:
-    def __init__(self):
-        logger.info("ParseService initialized")
+    def parse_text(self, text: str, rules: List[ParseRule]) -> ParseResult:
+        start_time = datetime.now()
+        matches: List[ParseMatch] = []
+        rules_matched: List[str] = []
 
-    def parse_text(self, text: str, config: ParseConfiguration) -> List[Dict[str, str]]:
-        logger.info(f"Parsing text: {text} with config: {config}")
-        # Return a list of dictionaries. Each dictionary is a set of placeholders for a "row".
-        # First, extract all matches per rule.
-        all_rule_matches = []
-        for rule in config.rules:
+        for rule in rules:
             if rule.scope == ParseScope.LINE_BY_LINE:
-                raw_matches = self._parse_line_by_line_all(text, rule)
+                rule_matches = self._parse_line_by_line(text, rule)
             else:
-                raw_matches = self._parse_all_text_all(text, rule)
+                rule_matches = self._parse_all_text(text, rule)
+            
+            if rule_matches:
+                matches.extend(rule_matches)
+                rules_matched.append(rule.name)
 
-            if not raw_matches:
-                # Nothing found
-                if rule.fallback_strategy == ParseFallbackStrategy.ERROR:
-                    logger.error(f"No match found for '{rule.label}'")
-                    raise ValueError(f"No match found for '{rule.label}'")
-                elif rule.fallback_strategy == ParseFallbackStrategy.EMPTY:
-                    raw_matches = [""]
-                elif rule.fallback_strategy == ParseFallbackStrategy.CUSTOM:
-                    raw_matches = [rule.fallback_value]
+        execution_time = (datetime.now() - start_time).total_seconds()
+        metrics = ParseMetrics(
+            total_matches=len(matches),
+            execution_time=execution_time,
+            chars_processed=len(text),
+            rules_matched=rules_matched
+        )
 
-            # Apply multiple_strategy
-            if rule.multiple_strategy == ParseMultipleStrategy.FIRST:
-                raw_matches = [raw_matches[0]]  # only first match
+        return ParseResult(
+            matches=matches,
+            metrics=metrics
+        )
 
-            # Save the final matches for this rule
-            # raw_matches is the final list of strings for this rule
-            all_rule_matches.append((rule.label, raw_matches))
+    def _parse_line_by_line(self, text: str, rule: ParseRule) -> List[ParseMatch]:
+        matches = []
+        for i, line in enumerate(text.splitlines(), 1):
+            line_matches = self._apply_rule(line, rule, line_number=i)
+            if line_matches:
+                matches.extend(line_matches)
+                if rule.strategy == ParseStrategy.FIRST_MATCH:
+                    break
+        return matches
 
-        # Combine the matches of all rules
-        # Find the minimum length of the lists "all"
-        min_length = min(len(m[1]) for m in all_rule_matches)
-        # Create min_length entries
-        entries = []
-        for i in range(min_length):
-            entry_data = {}
-            for (label, matches) in all_rule_matches:
-                # If this rule has less matches of i (shouldn't happen by min_length), take the first
-                # but thanks to min_length this doesn't happen.
-                entry_data[label] = matches[i if i < len(matches) else 0]
-            entries.append(entry_data)
+    def _parse_all_text(self, text: str, rule: ParseRule) -> List[ParseMatch]:
+        return self._apply_rule(text, rule)
 
-        logger.debug(f"Parsed entries: {entries}")
-        return entries
-
-    def _parse_line_by_line_all(self, text: str, rule: ParseRule) -> List[str]:
-        lines = text.splitlines()
-        results = []
-        for line in lines:
-            matches = self._apply_rule_on_text_all(line, rule)
-            results.extend(matches)
-        return results
-
-    def _parse_all_text_all(self, text: str, rule: ParseRule) -> List[str]:
-        return self._apply_rule_on_text_all(text, rule)
-
-    def _apply_rule_on_text_all(self, text: str, rule: ParseRule) -> List[str]:
+    def _apply_rule(self, text: str, rule: ParseRule, line_number: Optional[int] = None) -> List[ParseMatch]:
+        matches = []
+        
         if rule.mode == ParseMode.REGEX:
-            # For multiple matches we use findall
-            matches = re.findall(rule.pattern, text)
-            if not matches:
-                return []
-            return matches if isinstance(matches, list) else [matches]
-        else:
-            # KEYWORD mode with multiple matches
-            # Search for all appearances
-            results = []
-            start_idx = 0
+            regex_matches = list(re.finditer(rule.pattern, text))
+            for match in regex_matches:
+                location = ParseLocation(
+                    start=match.start(),
+                    end=match.end(),
+                    line_number=line_number
+                )
+                matches.append(ParseMatch(
+                    value=match.group(),
+                    location=location,
+                    rule_name=rule.name,
+                    confidence=1.0
+                ))
+        
+        elif rule.mode == ParseMode.KEYWORD:
+            start = 0
             while True:
-                start_pos = text.find(rule.pattern, start_idx) if rule.pattern else 0
-                if rule.pattern and start_pos == -1:
+                start_idx = text.find(rule.pattern, start)
+                if start_idx == -1:
                     break
-                if rule.pattern:
-                    start_search = start_pos + len(rule.pattern)
-                else:
-                    start_search = start_idx
-
-                end_pos = len(text)
+                    
+                end_idx = len(text)
                 if rule.secondary_pattern:
-                    sec_pos = text.find(rule.secondary_pattern, start_search)
-                    if sec_pos == -1:
-                        # no more matches
-                        break
-                    end_pos = sec_pos
+                    end_match = text.find(rule.secondary_pattern, start_idx + len(rule.pattern))
+                    if end_match != -1:
+                        end_idx = end_match
+                
+                location = ParseLocation(
+                    start=start_idx,
+                    end=end_idx,
+                    line_number=line_number
+                )
+                
+                value = text[start_idx + len(rule.pattern):end_idx].strip()
+                if value:
+                    matches.append(ParseMatch(
+                        value=value,
+                        location=location,
+                        rule_name=rule.name,
+                        confidence=0.9  # Slightly lower confidence for keyword matching
+                    ))
+                
+                start = end_idx + 1
 
-                extracted = text[start_search:end_pos].strip()
-                if extracted:
-                    results.append(extracted)
-
-                # advance start_idx
-                if rule.pattern:
-                    start_idx = end_pos + (len(rule.secondary_pattern) if rule.secondary_pattern else 0)
-                else:
-                    # If no initial pattern, avoid infinite loop
-                    break
-
-            return results
+        # Apply strategy
+        if matches and rule.strategy == ParseStrategy.FIRST_MATCH:
+            return [matches[0]]
+        elif matches and rule.strategy == ParseStrategy.LONGEST_MATCH:
+            return [max(matches, key=lambda m: len(m.value))]
+        
+        return matches
