@@ -8,7 +8,7 @@ class GeneratedResult:
         self.response = response
 
 class ParseEntry:
-    def __init__(self, data: Dict[str, Any]):
+    def __init__(self, data: Dict[str, str]):
         self.data = data
 
 class ParsedResult:
